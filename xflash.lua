@@ -1,5 +1,4 @@
--- MediaTek XFlash Professional - Context Aware Dissector
--- Features: Response Counter + Hex Fallback + Efuse Logic
+-- MediaTek XFlash - 
 
 local xf
 if not _G.mtk_xf_proto then
@@ -109,8 +108,7 @@ local CMDS = {
     [0xC0030002] = "ERR_DA_FILE_INVALID"
 }
 
--- --- 2. COMMANDS EXPECTING DATA RESPONSES ---
--- count: 2 for Efuse (Efuse Arg + Yield Arg), 1 for standard info commands
+-- --- COMMANDS EXPECTING DATA RESPONSES ---
 local DATA_RESP_COMMANDS = {
     [0x01000E] = { name = "Efuse WRITE", count = 2 },
     [0x01000F] = { name = "Efuse READ",  count = 2 },
@@ -123,7 +121,7 @@ local DATA_RESP_COMMANDS = {
     [0x040014] = { name = "GetHrid",     count = 1 },
 }
 
--- --- 3. STATE TRACKING ---
+-- ---  STATE TRACKING ---
 local stream_buffers = { host = "", dev = "" }
 local pkt_info_map = {} 
 local pkt_expert_map = {}
@@ -151,7 +149,7 @@ local function get_hex_string(buffer, start_pos, length)
     return res
 end
 
--- --- 4. THE CONTEXT-AWARE SCANNER ---
+-- ---  SCANNER ---
 local function aggressive_scan(dir_key, is_host)
     local summaries = {}
     local findings = {}
@@ -237,7 +235,7 @@ local function aggressive_scan(dir_key, is_host)
     return summaries, findings
 end
 
--- --- 5. DISSECTOR ---
+-- ---  DISSECTOR ---
 function xf.dissector(tvb, pinfo, root)
     if tvb:len() == 0 then return end
     local is_host = (tostring(pinfo.src) == "host" or not tostring(pinfo.src):find("%."))
@@ -275,7 +273,7 @@ function xf.dissector(tvb, pinfo, root)
     end
 end
 
--- --- 6. REGISTRATION ---
+-- ---  REGISTRATION ---
 local function register()
     local tables = {"usb.bulk", "usb.data", "usbcom.data"}
     for _, name in ipairs(tables) do
