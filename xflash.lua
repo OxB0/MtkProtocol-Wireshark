@@ -183,15 +183,41 @@ local function decode_struct(ctx, dir_in, len, p)
         if len == 20 then       -- EnvParams (SETUP_ENVIRONMENT)
             return string.format("Env{log_lvl=%d ch=%d os=%d ufs_prov=%d}",
                 u32(p,0), u32(p,4), u32(p,8), u32(p,12))
-        elseif len == 48 then   -- FlashOpParams (WRITE_DATA/READ_DATA/FORMAT)
+        elseif len >= 48 and len <= 56 then   -- FlashOpParams (WRITE_DATA/READ_DATA/FORMAT)
+            -- pack("<IIQQ", storage, parttype, addr, size) + NandExtension tail.
+            -- 48 bytes on older DAs, 52/56 on newer ones; leading 24 bytes match.
             local st, pt = u32(p,0), u32(p,4)
             return string.format("FlashOp{storage=%s part=%s addr=0x%X size=0x%X}",
                 STORAGE[st] or st, EMMC_PART[pt] or pt, u64(p,8), u64(p,16))
         elseif len == 16 then   -- BootTo addr+len (u64,u64)
             return string.format("addr=0x%X len=0x%X", u64(p,0), u64(p,8))
         end
-    elseif len == 8 then        -- device -> host: PacketLenParams
-        return string.format("pkt_len{write=0x%X read=0x%X}", u32(p,0), u32(p,4))
+    else
+        -- device -> host responses, decoded by the DEVICE_CTRL query that asked.
+        -- Field layouts mirror mtkclient's xflash_lib get_* parsers.
+        if ctx == "GET_CHIP_ID" and len >= 10 then
+            return string.format("hw_code=0x%04X hw_sub=0x%04X hw_ver=0x%04X sw_ver=0x%04X evo=0x%04X",
+                u16(p,0), u16(p,2), u16(p,4), u16(p,6), u16(p,8))
+        elseif ctx == "GET_EMMC_INFO" and len >= 72 then
+            return string.format("eMMC block=0x%X boot1=0x%X boot2=0x%X rpmb=0x%X user=0x%X",
+                u32(p,4), u64(p,8), u64(p,16), u64(p,24), u64(p,64))
+        elseif ctx == "GET_RAM_INFO" and len == 48 then
+            return string.format("SRAM base=0x%X size=0x%X | DRAM base=0x%X size=0x%X",
+                u64(p,8), u64(p,16), u64(p,32), u64(p,40))
+        elseif ctx == "GET_RAM_INFO" and len == 24 then
+            return string.format("SRAM base=0x%X size=0x%X | DRAM base=0x%X size=0x%X",
+                u32(p,4), u32(p,8), u32(p,16), u32(p,20))
+        elseif ctx == "GET_NAND_INFO" and len >= 32 then
+            return string.format("NAND page=0x%X block=0x%X spare=0x%X total=0x%X avail=0x%X",
+                u32(p,4), u32(p,8), u32(p,12), u64(p,16), u64(p,24))
+        elseif ctx == "GET_NOR_INFO" and len >= 16 then
+            return string.format("NOR page=0x%X size=0x%X", u32(p,4), u64(p,8))
+        elseif ctx == "GET_UFS_INFO" and len >= 32 then
+            return string.format("UFS block=0x%X lu0=0x%X lu1=0x%X lu2=0x%X",
+                u32(p,4), u64(p,24), u64(p,16), u64(p,8))
+        elseif len == 8 then    -- PacketLenParams (GET_PACKET_LENGTH)
+            return string.format("pkt_len{write=0x%X read=0x%X}", u32(p,0), u32(p,4))
+        end
     end
     -- printable ascii: partition names ("PGPT"/"super"), "preloader", "high-speed"
     if len == 4 then
@@ -611,24 +637,71 @@ local function register()
 end
 register()
 
--- ------------------------------------------------------------- flash summary
--- Per-partition write summary, reachable in the GUI at
+-- ------------------------------------------------------------- session summary
+-- Device identity + what the session did, reachable in the GUI at
 -- Tools ▸ MTK XFlash ▸ Flash summary. Accumulates from dissected frames, so it
 -- works even on a partial capture that never reaches END_DL_INFO.
 -- Field extractors MUST be created at load time (not inside the menu callback).
+local CHIPS = {   -- hw_code -> SoC name (mtkclient brom_config; first part number)
+    [0x279]="MT6797", [0x321]="MT6735", [0x326]="MT6755", [0x335]="MT6737M",
+    [0x337]="MT6753", [0x507]="MT6759", [0x551]="MT6757", [0x562]="MT6799",
+    [0x601]="MT6750", [0x688]="MT6758", [0x690]="MT6763", [0x699]="MT6739",
+    [0x707]="MT6768/69", [0x717]="MT6761/62", [0x725]="MT6779", [0x766]="MT6765",
+    [0x788]="MT6771", [0x813]="MT6785", [0x816]="MT6885", [0x886]="MT6873",
+    [0x907]="MT6983", [0x930]="MT8195", [0x950]="MT6891/93", [0x959]="MT6877",
+    [0x989]="MT6833", [0x992]="MT6880", [0x996]="MT6853", [0x1066]="MT6781",
+    [0x1129]="MT6855", [0x1172]="MT6895", [0x1203]="MT6897", [0x1208]="MT6789",
+    [0x1209]="MT6835V", [0x1229]="MT6886", [0x1236]="MT6989W", [0x1296]="MT6985",
+    [0x1357]="MT6991", [0x1375]="MT6878", [0x1471]="MT6993", [0x6580]="MT6580",
+    [0x6595]="MT6595", [0x6752]="MT6752", [0x6795]="MT6795", [0x8127]="MT8127",
+    [0x8163]="MT8163", [0x8167]="MT8167", [0x8176]="MT8176",
+}
+
 local sf_part = Field.new("xflash.partition")
 local sf_len  = Field.new("xflash.length")
 local sf_kind = Field.new("xflash.kind")
+local sf_cmd  = Field.new("xflash.cmd")
+local sf_text = Field.new("xflash.text")
+
+local function hsize(n)   -- byte count -> GiB/MiB/KiB (storage & RAM are large)
+    if n >= 0x40000000 then return string.format("%.2f GiB", n / 0x40000000) end
+    if n >= 0x100000   then return string.format("%.1f MiB", n / 0x100000)   end
+    if n >= 0x400      then return string.format("%.1f KiB", n / 0x400)      end
+    return tostring(n) .. " B"
+end
+-- true if `s` reports a non-zero size for `pat` (every storage type is queried;
+-- only the one actually present has non-zero fields)
+local function present(s, pat)
+    local v = tonumber((s:match(pat)) or "0", 16)
+    return v and v > 0
+end
 
 local function show_flash_summary()
     local acc, errors = {}, 0
+    local cmdhist, ncmd = {}, 0
+    local dev = {}
     local tap = Listener.new(nil, "xflash")
-    local win = TextWindow.new("MTK XFlash — flash summary")
+    local win = TextWindow.new("MTK XFlash — session summary")
 
-    function tap.reset() acc, errors = {}, 0 end
+    function tap.reset() acc, errors, cmdhist, ncmd, dev = {}, 0, {}, 0, {} end
     function tap.packet()
         local ki = sf_kind(); if not ki then return end
         local kind = tostring(ki.value)
+
+        local c = sf_cmd()
+        if c then cmdhist[c.value] = (cmdhist[c.value] or 0) + 1; ncmd = ncmd + 1 end
+
+        local t = sf_text()
+        if t then
+            local s = tostring(t.value)
+            if     s:find("^hw_code=")                              then dev.chip = s
+            elseif s:find("^eMMC ") and present(s, "user=0x(%x+)")  then dev.emmc = s
+            elseif s:find("^UFS ")  and present(s, "lu0=0x(%x+)")   then dev.ufs  = s
+            elseif s:find("^NAND ") and present(s, "total=0x(%x+)") then dev.nand = s
+            elseif s:find("^SRAM ")                                 then dev.ram  = s
+            end
+        end
+
         if kind == "image" then
             local p = sf_part() and tostring(sf_part().value) or "?"
             local a = acc[p] or { w = 0, c = 0 }
@@ -640,17 +713,58 @@ local function show_flash_summary()
         end
     end
     function tap.draw()
-        local names, out = {}, {}
-        for p in pairs(acc) do names[#names + 1] = p end
-        table.sort(names)
-        for _, p in ipairs(names) do
-            local a, total = acc[p], flash_totals[p]
-            local pct = (total and total > 0)
-                and string.format("  —  %d%% of %s", math.floor(a.w / total * 100), human(total)) or ""
-            out[#out + 1] = string.format("%-16s %10s in %d chunks%s\n", p, human(a.w), a.c, pct)
+        local out = {}
+
+        out[#out + 1] = "=== Device ===\n"
+        if dev.chip then
+            local hw = tonumber((dev.chip:match("hw_code=0x(%x+)")) or "", 16)
+            local sw = dev.chip:match("sw_ver=0x%x+")
+            out[#out + 1] = string.format("  SoC:     %s (hw_code 0x%X%s)\n",
+                (hw and CHIPS[hw]) or "unknown", hw or 0, sw and (", " .. sw) or "")
         end
+        if dev.emmc then
+            local u = tonumber((dev.emmc:match("user=0x(%x+)")) or "", 16)
+            out[#out + 1] = string.format("  Storage: eMMC%s\n", u and (" — user " .. hsize(u)) or "")
+            out[#out + 1] = "           " .. dev.emmc .. "\n"
+        elseif dev.ufs then
+            local l = tonumber((dev.ufs:match("lu0=0x(%x+)")) or "", 16)
+            out[#out + 1] = string.format("  Storage: UFS%s\n", l and (" — LU0 " .. hsize(l)) or "")
+            out[#out + 1] = "           " .. dev.ufs .. "\n"
+        elseif dev.nand then
+            out[#out + 1] = "  Storage: NAND — " .. dev.nand .. "\n"
+        end
+        if dev.ram then
+            local d = tonumber((dev.ram:match("DRAM base=0x%x+ size=0x(%x+)")) or "", 16)
+            out[#out + 1] = string.format("  DRAM:    %s\n", d and hsize(d) or dev.ram)
+        end
+        if not dev.chip and not dev.emmc and not dev.ufs then
+            out[#out + 1] = "  (no device info — device→host direction not recorded in this capture)\n"
+        end
+
+        out[#out + 1] = string.format("\n=== What it did (%d commands) ===\n", ncmd)
+        local rows = {}
+        for cv, n in pairs(cmdhist) do rows[#rows + 1] = { cv = cv, n = n } end
+        table.sort(rows, function(a, b) if a.n ~= b.n then return a.n > b.n end return a.cv < b.cv end)
+        for _, e in ipairs(rows) do
+            out[#out + 1] = string.format("  %-24s %d\n", CMDS[e.cv] or string.format("0x%X", e.cv), e.n)
+        end
+
+        local wn = {}
+        for p in pairs(acc) do wn[#wn + 1] = p end
+        if #wn > 0 then
+            out[#out + 1] = "\n=== Partition writes ===\n"
+            table.sort(wn)
+            for _, p in ipairs(wn) do
+                local a, total = acc[p], flash_totals[p]
+                local pct = (total and total > 0)
+                    and string.format("  —  %d%% of %s", math.floor(a.w / total * 100), human(total)) or ""
+                out[#out + 1] = string.format("  %-16s %10s in %d chunks%s\n", p, human(a.w), a.c, pct)
+            end
+        end
+
         if errors > 0 then out[#out + 1] = string.format("\n! %d error status(es) seen\n", errors) end
-        if #out == 0 then out[1] = "No flash write (DOWNLOAD / WRITE_DATA) seen in this capture.\n" end
+        if ncmd == 0 then out[1] = "No XFlash (V5) traffic seen in this capture.\n" end
+
         win:set(table.concat(out))
         tap:remove()
     end

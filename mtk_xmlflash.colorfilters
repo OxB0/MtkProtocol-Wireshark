@@ -1,0 +1,11 @@
+# MTK XMLFlash V6 coloring rules.
+# Import in Wireshark: View > Coloring Rules > Import... (select this file).
+# First match wins, so the error rule is intentionally first.
+@MTK V6 error@xmlflash.kind=="err"@[61000,18000,18000][65535,65535,65535]
+@MTK V6 command@xmlflash.kind=="cmd"@[28000,44000,62000][65535,65535,65535]
+@MTK V6 negotiate@xmlflash.kind=="negotiate" || xmlflash.kind=="file_op"@[45000,35000,58000][65535,65535,65535]
+@MTK V6 data@xmlflash.kind=="data"@[33000,58000,38000][0,0,0]
+@MTK V6 end/start@xmlflash.kind=="end_cmd" || xmlflash.kind=="start"@[50000,55000,60000][0,0,0]
+@MTK V6 ack@xmlflash.kind=="ack" || xmlflash.kind=="ack_len" || xmlflash.kind=="eot"@[55000,62000,55000][0,0,0]
+@MTK V6 info@xmlflash.kind=="hw_info" || xmlflash.kind=="da_info" || xmlflash.kind=="part_table" || xmlflash.kind=="sla_info"@[63000,60000,40000][0,0,0]
+@MTK V6 log@xmlflash.kind=="log"@[54000,54000,54000][28000,28000,28000]
