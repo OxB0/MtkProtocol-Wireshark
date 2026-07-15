@@ -1,15 +1,34 @@
 # MTK Wireshark Scripts
 
-Just some Lua scripts for parsing MediaTek protocols in Wireshark. 
-Code is currently kinda trashy, but hopefully I will find time to patch it :)
+Lua dissector for MediaTek **XFlash** (V5) USB protocol 
 
-### Status: WIP
-This is still a work in progress. It tracks the flow of commands—if the host asks for a ChipID or Efuse, the script labels the incoming data so you don't have to guess what it is.
+## Setup
 
-### How to use
-The easiest way to see the flow is to open **Expert Information** in Wireshark. It’ll give you a clean, chronological list of every command, response, and log message.
+Drop `xflash.lua` into your Wireshark plugins folder and reload (`Ctrl+Shift+L`):
 
-### Setup
-Drop the `.lua` file into your Wireshark plugins folder and reload (`Ctrl+Shift+L`).
+- Windows: `%APPDATA%\Wireshark\plugins`
+- Linux/macOS: `~/.local/lib/wireshark/plugins` (or `~/.config/wireshark/plugins`)
 
-<img width="2560" height="1399" alt="image" src="https://github.com/user-attachments/assets/a2262fef-1b6e-4787-88d9-b1255b4b7abe" />
+Capture the USB traffic with USBPcap (Windows) or usbmon (Linux). **Turn off any
+snap length / "capture only first N bytes"** — otherwise large image transfers are
+truncated (the dissector still tracks them via `usb.data_len`, but you won't get the
+image bytes; see "Truncated captures" below).
+
+## Making a capture easy to read
+
+**Flow view.** Open **Analyze ▸ Expert Information** for a clean chronological list
+of every command / response.
+
+**Progress column.** Right-click the column header ▸ *Column Preferences* ▸ **+** ▸
+Type `Custom`, Field `xflash.progress`. You'll see `714 MB / 4094 MB (17%)` inline
+while scrolling.
+
+**Coloring.** Import `mtk_xflash.colorfilters` via **View ▸ Coloring Rules ▸
+Import…** — errors red, image chunks green, commands blue, reads purple.
+
+**Flash summary.** **Tools ▸ MTK XFlash ▸ Flash summary** shows, per partition,
+bytes written / chunk count / % of total and any error statuses. Works even on a
+partial capture.
+
+Reassembly fragments are intentionally not tagged as `xflash`, so the `xflash`
+filter already shows only real frames.
